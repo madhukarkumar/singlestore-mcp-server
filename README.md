@@ -169,28 +169,6 @@ node build/index.js
 
 2. Restart the Claude Desktop App
 
-### Installing in Cursor
-
-1. Add the server configuration to `~/Library/Application Support/Cursor/User/globalStorage/{user-name}.claude-dev/settings/cline_mcp_settings.json`:
-```json
-{
-  "mcpServers": {
-    "singlestore": {
-      "command": "node",
-      "args": ["path/to/mcp-server-singlestore/build/index.js"],
-      "env": {
-        "SINGLESTORE_HOST": "your-host.singlestore.com",
-        "SINGLESTORE_PORT": "3306",
-        "SINGLESTORE_USER": "your-username",
-        "SINGLESTORE_PASSWORD": "your-password",
-        "SINGLESTORE_DATABASE": "your-database"
-      }
-    }
-  }
-}
-```
-
-2. Restart Cursor
 
 ## Security Considerations
 
