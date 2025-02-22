@@ -1,0 +1,43 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - singlestoreHost
+      - singlestorePort
+      - singlestoreUser
+      - singlestorePassword
+      - singlestoreDatabase
+    properties:
+      singlestoreHost:
+        type: string
+        description: The hostname of the SingleStore instance.
+      singlestorePort:
+        type: number
+        description: The port number to connect to SingleStore, usually 3306.
+      singlestoreUser:
+        type: string
+        description: The username for SingleStore authentication.
+      singlestorePassword:
+        type: string
+        description: The password for SingleStore authentication.
+      singlestoreDatabase:
+        type: string
+        description: The name of the SingleStore database to connect to.
+  commandFunction:
+    # A function that produces the CLI command to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: 'node',
+      args: ['build/index.js'],
+      env: {
+        SINGLESTORE_HOST: config.singlestoreHost,
+        SINGLESTORE_PORT: config.singlestorePort.toString(),
+        SINGLESTORE_USER: config.singlestoreUser,
+        SINGLESTORE_PASSWORD: config.singlestorePassword,
+        SINGLESTORE_DATABASE: config.singlestoreDatabase
+      }
+    })
