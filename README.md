@@ -1,5 +1,7 @@
 # SingleStore MCP Server
 
+[![smithery badge](https://smithery.ai/badge/@madhukarkumar/singlestore-mcp-server)](https://smithery.ai/server/@madhukarkumar/singlestore-mcp-server)
+
 A Model Context Protocol (MCP) server for interacting with SingleStore databases. This server provides tools for querying tables, describing schemas, and generating ER diagrams.
 
 ## Features
@@ -19,6 +21,14 @@ A Model Context Protocol (MCP) server for interacting with SingleStore databases
 - SingleStore CA bundle (automatically fetched from portal)
 
 ## Installation
+
+### Installing via Smithery
+
+To install SingleStore MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@madhukarkumar/singlestore-mcp-server):
+
+```bash
+npx -y @smithery/cli install @madhukarkumar/singlestore-mcp-server --client claude
+```
 
 1. Clone the repository:
 ```bash
