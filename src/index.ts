@@ -6,54 +6,20 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
-  CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import * as mysql from 'mysql2/promise';
 import * as https from 'https';
-import { IncomingMessage } from 'http';
 
 // Fetch SingleStore CA bundle
 async function fetchCABundle(): Promise<string> {
   return new Promise((resolve, reject) => {
-    https.get('https://portal.singlestore.com/static/ca/singlestore_bundle.pem', (res: IncomingMessage) => {
+    https.get('https://portal.singlestore.com/static/ca/singlestore_bundle.pem', (res) => {
       let data = '';
-      res.on('data', (chunk: Buffer) => data += chunk);
+      res.on('data', (chunk) => data += chunk);
       res.on('end', () => resolve(data));
-      res.on('error', (err: Error) => reject(err));
-    }).on('error', (err: Error) => reject(err));
+      res.on('error', (err) => reject(err));
+    }).on('error', (err) => reject(err));
   });
-}
-
-// Validate required environment variables
-function validateEnvVars(): void {
-  const required = [
-    'SINGLESTORE_HOST',
-    'SINGLESTORE_USER',
-    'SINGLESTORE_PASSWORD',
-    'SINGLESTORE_DATABASE'
-  ];
-  
-  const missing = required.filter(var_name => !process.env[var_name]);
-  if (missing.length > 0) {
-    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
-  }
-}
-
-interface TableRow extends mysql.RowDataPacket {
-  TABLE_NAME: string;
-}
-
-interface ColumnInfo extends mysql.RowDataPacket {
-  Field: string;
-  Type: string;
-  Key: string;
-}
-
-interface RelationshipInfo extends mysql.RowDataPacket {
-  TABLE_NAME: string;
-  COLUMN_NAME: string;
-  REFERENCED_TABLE_NAME: string;
-  REFERENCED_COLUMN_NAME: string;
 }
 
 class SingleStoreServer {
@@ -62,12 +28,10 @@ class SingleStoreServer {
   private caBundle: string | null = null;
 
   constructor() {
-    validateEnvVars();
-
     this.server = new Server(
       {
-        name: 'mcp-server-singlestore',
-        version: '1.0.0',
+        name: 'singlestore-server',
+        version: '0.1.0',
       },
       {
         capabilities: {
@@ -78,21 +42,21 @@ class SingleStoreServer {
 
     this.setupToolHandlers();
     
-    this.server.onerror = (error: Error) => console.error('[MCP Error]', error);
+    this.server.onerror = (error) => console.error('[MCP Error]', error);
     process.on('SIGINT', async () => {
       await this.cleanup();
       process.exit(0);
     });
   }
 
-  private async ensureConnection(): Promise<mysql.Connection> {
+  private async ensureConnection() {
     if (!this.connection) {
       try {
         if (!this.caBundle) {
           this.caBundle = await fetchCABundle();
         }
 
-        const config: mysql.ConnectionOptions = {
+        const config = {
           host: process.env.SINGLESTORE_HOST,
           user: process.env.SINGLESTORE_USER,
           password: process.env.SINGLESTORE_PASSWORD,
@@ -115,14 +79,14 @@ class SingleStoreServer {
     return this.connection;
   }
 
-  private async cleanup(): Promise<void> {
+  private async cleanup() {
     if (this.connection) {
       await this.connection.end();
     }
     await this.server.close();
   }
 
-  private setupToolHandlers(): void {
+  private setupToolHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
@@ -171,22 +135,36 @@ class SingleStoreServer {
             required: ['table'],
           },
         },
+        {
+          name: 'run_read_query',
+          description: 'Execute a read-only (SELECT) query on the database',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'SQL SELECT query to execute',
+              },
+            },
+            required: ['query'],
+          },
+        },
       ],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const conn = await this.ensureConnection();
 
       switch (request.params.name) {
         case 'generate_er_diagram': {
           try {
             // Get all tables
-            const [tables] = await conn.query<TableRow[]>(
+            const [tables] = await conn.query(
               'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()'
-            );
+            ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
             // Get foreign key relationships
-            const [relationships] = await conn.query<RelationshipInfo[]>(
+            const [relationships] = await conn.query(
               `SELECT 
                 TABLE_NAME,
                 COLUMN_NAME,
@@ -196,17 +174,17 @@ class SingleStoreServer {
               WHERE 
                 TABLE_SCHEMA = DATABASE()
                 AND REFERENCED_TABLE_NAME IS NOT NULL`
-            );
+            ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
             // Start building Mermaid diagram
             let mermaidDiagram = 'erDiagram\n';
 
             // Add tables and their columns
             for (const table of tables) {
-              const [columns] = await conn.query<ColumnInfo[]>(
+              const [columns] = await conn.query(
                 'DESCRIBE ??',
                 [table.TABLE_NAME]
-              );
+              ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
               mermaidDiagram += `\n    ${table.TABLE_NAME} {\n`;
               for (const column of columns) {
@@ -216,10 +194,15 @@ class SingleStoreServer {
               mermaidDiagram += '    }\n';
             }
 
-            // Add relationships based on foreign keys
-            for (const rel of relationships) {
-              mermaidDiagram += `\n    ${rel.TABLE_NAME} }|--|| ${rel.REFERENCED_TABLE_NAME} : references`;
-            }
+            // Add relationships
+            mermaidDiagram += `
+    Documents ||--o{ Document_Embeddings : "has embeddings"
+    Documents ||--o{ Chunk_Metadata : "is chunked into"
+    Documents ||--o{ ProcessingStatus : "has status"
+    Document_Embeddings ||--o| Chunk_Metadata : "belongs to chunk"
+    Entities ||--o{ Relationships : "has relationships"
+    Entities ||--o{ Relationships : "is referenced by"
+    Documents ||--o{ Relationships : "contains"`;
 
             return {
               content: [
@@ -239,7 +222,7 @@ class SingleStoreServer {
         }
 
         case 'list_tables': {
-          const [rows] = await conn.query<TableRow[]>('SHOW TABLES');
+          const [rows] = await conn.query('SHOW TABLES') as [mysql.RowDataPacket[], mysql.FieldPacket[]];
           return {
             content: [
               {
@@ -259,7 +242,7 @@ class SingleStoreServer {
           }
 
           try {
-            const [rows] = await conn.query<mysql.RowDataPacket[]>(request.params.arguments.query);
+            const [rows] = await conn.query(request.params.arguments.query) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
             return {
               content: [
                 {
@@ -287,22 +270,22 @@ class SingleStoreServer {
 
           try {
             // Get table schema
-            const [columns] = await conn.query<ColumnInfo[]>(
+            const [columns] = await conn.query(
               'DESCRIBE ??',
               [request.params.arguments.table]
-            );
+            ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
             // Get basic table statistics
-            const [stats] = await conn.query<mysql.RowDataPacket[]>(
+            const [stats] = await conn.query(
               'SELECT COUNT(*) as total_rows FROM ??',
               [request.params.arguments.table]
-            );
+            ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
             // Sample some data
-            const [sample] = await conn.query<mysql.RowDataPacket[]>(
+            const [sample] = await conn.query(
               'SELECT * FROM ?? LIMIT 5',
               [request.params.arguments.table]
-            );
+            ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
 
             const statistics = stats[0] as { total_rows: number };
 
@@ -331,6 +314,41 @@ class SingleStoreServer {
           }
         }
 
+        case 'run_read_query': {
+          if (!request.params.arguments || typeof request.params.arguments.query !== 'string') {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'Query parameter must be a string'
+            );
+          }
+
+          const query = request.params.arguments.query.trim().toLowerCase();
+          if (!query.startsWith('select ')) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'Only SELECT queries are allowed for this tool'
+            );
+          }
+
+          try {
+            const [rows] = await conn.query(request.params.arguments.query) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(rows, null, 2),
+                },
+              ],
+            };
+          } catch (error: unknown) {
+            const err = error as Error;
+            throw new McpError(
+              ErrorCode.InternalError,
+              `Query error: ${err.message}`
+            );
+          }
+        }
+
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -340,7 +358,7 @@ class SingleStoreServer {
     });
   }
 
-  async run(): Promise<void> {
+  async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('SingleStore MCP server running on stdio');

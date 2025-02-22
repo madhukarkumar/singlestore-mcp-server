@@ -134,13 +134,24 @@ SINGLESTORE_DATABASE=your-database
    })
    ```
 
+5. **run_read_query**
+   - Executes a read-only (SELECT) query on the database
+   - Parameters:
+     - query: SQL SELECT query to execute
+   ```typescript
+   use_mcp_tool({
+     server_name: "singlestore",
+     tool_name: "run_read_query",
+     arguments: {
+       query: "SELECT * FROM your_table LIMIT 5"
+     }
+   })
 ### Running Standalone
 
 1. Build the server:
 ```bash
 npm run build
 ```
-
 2. Run the server:
 ```bash
 node build/index.js
