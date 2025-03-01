@@ -25,8 +25,50 @@ interface ColumnRowDataPacket extends mysql.RowDataPacket {
   Extra?: string;
 }
 
-interface ResultSetHeader extends mysql.OkPacket {
+// Define ResultSetHeader interface - mysql2 doesn't export ResultSetHeader directly
+interface ResultSetHeader {
   affectedRows: number;
+  insertId: number;
+  warningStatus: number;
+}
+
+// Define TableOptions interface for better type safety
+interface TableOptions {
+  is_reference?: boolean;
+  shard_key?: string[];
+  sort_key?: string[];
+  compression?: string;
+  auto_increment_start?: number;
+}
+
+interface ColumnGenerator {
+  type: 'sequence' | 'random' | 'values' | 'formula';
+  start?: number;
+  increment?: number;
+  end?: number;
+  values?: any[];
+  formula?: string;
+}
+
+interface Column {
+  name: string;
+  type: string;
+  nullable?: boolean;
+  default?: string | number | boolean;
+  auto_increment?: boolean;
+}
+
+interface CreateTableArguments {
+  table_name: string;
+  columns: Column[];
+  table_options?: TableOptions;
+}
+
+interface GenerateSyntheticDataArguments {
+  table: string;
+  count?: number;
+  batch_size?: number;
+  column_generators?: Record<string, ColumnGenerator>;
 }
 
 // Fetch SingleStore CA bundle
@@ -550,10 +592,12 @@ class SingleStoreServer {
           }
 
           try {
-            const { table_name, columns, table_options = {} } = request.params.arguments;
+            // First convert to unknown, then to our expected type
+            const args = request.params.arguments as unknown as CreateTableArguments;
+            const { table_name, columns, table_options = {} as TableOptions } = args;
             
             // Start building the CREATE TABLE statement
-            let sql = `CREATE ${table_options.is_reference ? 'REFERENCE ' : ''}TABLE ${table_name} (\n`;
+            let sql = `CREATE ${(table_options as TableOptions).is_reference ? 'REFERENCE ' : ''}TABLE ${table_name} (\n`;
             
             // Add columns
             const columnDefs = columns.map(col => {
@@ -571,13 +615,13 @@ class SingleStoreServer {
             }
 
             // Add shard key if specified
-            if (table_options.shard_key?.length) {
-              columnDefs.push(`  SHARD KEY (${table_options.shard_key.join(', ')})`);
+            if ((table_options as TableOptions).shard_key?.length) {
+              columnDefs.push(`  SHARD KEY (${(table_options as TableOptions).shard_key.join(', ')})`);
             }
 
             // Add sort key if specified
-            if (table_options.sort_key?.length) {
-              columnDefs.push(`  SORT KEY (${table_options.sort_key.join(', ')})`);
+            if ((table_options as TableOptions).sort_key?.length) {
+              columnDefs.push(`  SORT KEY (${(table_options as TableOptions).sort_key.join(', ')})`);
             }
 
             sql += columnDefs.join(',\n');
@@ -585,11 +629,11 @@ class SingleStoreServer {
 
             // Add table options
             const tableOptions = [];
-            if (table_options.compression === 'SPARSE') {
+            if ((table_options as TableOptions).compression === 'SPARSE') {
               tableOptions.push('COMPRESSION = SPARSE');
             }
-            if (table_options.auto_increment_start) {
-              tableOptions.push(`AUTO_INCREMENT = ${table_options.auto_increment_start}`);
+            if ((table_options as TableOptions).auto_increment_start) {
+              tableOptions.push(`AUTO_INCREMENT = ${(table_options as TableOptions).auto_increment_start}`);
             }
             if (tableOptions.length) {
               sql += ' ' + tableOptions.join(' ');
@@ -658,10 +702,12 @@ class SingleStoreServer {
             );
           }
 
-          const table = request.params.arguments.table;
-          const count = request.params.arguments.count || 100;
-          const batchSize = Math.min(request.params.arguments.batch_size || 1000, 5000);
-          const columnGenerators = request.params.arguments.column_generators || {};
+          // First convert to unknown, then to our expected type
+          const args = request.params.arguments as unknown as GenerateSyntheticDataArguments;
+          const table = args.table;
+          const count = Number(args.count || 100);
+          const batchSize = Math.min(Number(args.batch_size || 1000), 5000);
+          const columnGenerators = args.column_generators || {};
 
           try {
             // Get table schema to understand column types
@@ -713,7 +759,7 @@ class SingleStoreServer {
                   
                   // Check if we have a custom generator for this column
                   if (columnGenerators[columnName]) {
-                    const generator = columnGenerators[columnName];
+                    const generator = columnGenerators[columnName] as ColumnGenerator;
                     
                     switch (generator.type) {
                       case 'sequence':
