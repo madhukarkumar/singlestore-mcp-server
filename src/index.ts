@@ -71,6 +71,22 @@ interface GenerateSyntheticDataArguments {
   column_generators?: Record<string, ColumnGenerator>;
 }
 
+// Interface for SQL optimization recommendations
+interface OptimizationRecommendation {
+  summary: {
+    total_runtime_ms: string;
+    compile_time_ms: string;
+    execution_time_ms: string;
+    bottlenecks: string[];
+  };
+  suggestions: Array<{
+    issue: string;
+    recommendation: string;
+    impact: 'high' | 'medium' | 'low';
+  }>;
+  optimizedQuery?: string;
+}
+
 // Fetch SingleStore CA bundle
 async function fetchCABundle(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -165,6 +181,195 @@ class SingleStoreServer {
     // Default fallback for unknown types
     return 'unknown_type_data';
   }
+
+  private async analyzeProfileData(profileData: any, originalQuery: string): Promise<OptimizationRecommendation> {
+    const result: OptimizationRecommendation = {
+      summary: {
+        total_runtime_ms: '0',
+        compile_time_ms: '0',
+        execution_time_ms: '0',
+        bottlenecks: []
+      },
+      suggestions: []
+    };
+
+    try {
+      // Parse the JSON string if it's not already an object
+      const profile = typeof profileData === 'string' ? JSON.parse(profileData) : profileData;
+      
+      // Extract query_info
+      const queryInfo = profile.query_info || {};
+      
+      // Set basic summary information
+      result.summary.total_runtime_ms = queryInfo.total_runtime_ms || '0';
+      
+      // Extract compile time from compile_time_stats if available
+      if (queryInfo.compile_time_stats && queryInfo.compile_time_stats.total) {
+        result.summary.compile_time_ms = queryInfo.compile_time_stats.total;
+        
+        // Calculate execution time (total - compile)
+        const totalTime = parseInt(result.summary.total_runtime_ms, 10);
+        const compileTime = parseInt(result.summary.compile_time_ms, 10);
+        result.summary.execution_time_ms = (totalTime - compileTime).toString();
+      }
+
+      // Analyze execution plan and operators
+      this.analyzeExecutionPlan(profile, result);
+      
+      // Analyze table statistics and memory usage
+      this.analyzeMemoryAndStats(profile, result);
+      
+      // Analyze network traffic and data movement
+      this.analyzeNetworkTraffic(profile, result);
+      
+      // Analyze compilation time
+      this.analyzeCompilationTime(profile, result);
+      
+      // Analyze partition skew
+      this.analyzePartitionSkew(profile, result);
+      
+      // Identify bottlenecks
+      this.identifyBottlenecks(profile, result);
+      
+    } catch (error) {
+      result.suggestions.push({
+        issue: 'Error analyzing profile data',
+        recommendation: 'The profile data could not be properly analyzed. Please check the query syntax.',
+        impact: 'high'
+      });
+    }
+    
+    return result;
+  }
+
+  private analyzeExecutionPlan(profile: any, result: OptimizationRecommendation): void {
+    const textProfile = profile.query_info?.text_profile || '';
+    const lines = textProfile.split('\n');
+    
+    // Look for full table scans
+    if (textProfile.includes('TableScan') && !textProfile.includes('IndexScan')) {
+      result.suggestions.push({
+        issue: 'Full table scan detected',
+        recommendation: 'Consider adding an index to the columns used in WHERE clauses to avoid scanning the entire table.',
+        impact: 'high'
+      });
+    }
+    
+    // Check for hash joins with large tables
+    if (textProfile.includes('HashJoin')) {
+      const rowsMatch = textProfile.match(/actual_rows: (\d+)/);
+      if (rowsMatch && parseInt(rowsMatch[1], 10) > 10000) {
+        result.suggestions.push({
+          issue: 'Large hash join operation',
+          recommendation: 'For large tables, consider using appropriate indexes on join columns or partitioning data to reduce the size of hash tables.',
+          impact: 'medium'
+        });
+      }
+    }
+  }
+
+  private analyzeMemoryAndStats(profile: any, result: OptimizationRecommendation): void {
+    const textProfile = profile.query_info?.text_profile || '';
+    const lines = textProfile.split('\n');
+    
+    // Check for high memory usage
+    for (const line of lines) {
+      const memoryMatch = line.match(/memory_usage: (\d+)/);
+      if (memoryMatch) {
+        const memoryUsage = parseInt(memoryMatch[1], 10);
+        if (memoryUsage > 100000) { // More than 100MB
+          result.suggestions.push({
+            issue: `High memory usage (${Math.round(memoryUsage / 1024)}MB)`,
+            recommendation: 'Consider adding appropriate indexes, breaking the query into smaller parts, or optimizing large in-memory operations.',
+            impact: 'high'
+          });
+        }
+      }
+    }
+  }
+
+  private analyzeNetworkTraffic(profile: any, result: OptimizationRecommendation): void {
+    const textProfile = profile.query_info?.text_profile || '';
+    const lines = textProfile.split('\n');
+    
+    let totalNetworkTraffic = 0;
+    
+    for (const line of lines) {
+      const trafficMatch = line.match(/network_traffic: (\d+(\.\d+)?)/);
+      if (trafficMatch) {
+        totalNetworkTraffic += parseFloat(trafficMatch[1]);
+      }
+    }
+    
+    if (totalNetworkTraffic > 100000) { // More than 100MB
+      result.suggestions.push({
+        issue: `High network traffic (${Math.round(totalNetworkTraffic / 1024)}MB)`,
+        recommendation: 'Consider optimizing data movement between nodes by using appropriate shard keys and reducing the amount of data transferred.',
+        impact: 'high'
+      });
+    }
+  }
+
+  private analyzeCompilationTime(profile: any, result: OptimizationRecommendation): void {
+    const compileTimeStats = profile.query_info?.compile_time_stats || {};
+    const totalCompileTime = parseInt(compileTimeStats.total || '0', 10);
+    const totalRuntime = parseInt(profile.query_info?.total_runtime_ms || '0', 10);
+    
+    if (totalRuntime > 0 && totalCompileTime > 0 && (totalCompileTime / totalRuntime) > 0.2) {
+      result.suggestions.push({
+        issue: `High compilation time (${totalCompileTime}ms, ${Math.round((totalCompileTime / totalRuntime) * 100)}% of total runtime)`,
+        recommendation: 'Consider parameterizing your queries for plan reuse or adjusting compilation-related variables.',
+        impact: 'medium'
+      });
+    }
+  }
+
+  private analyzePartitionSkew(profile: any, result: OptimizationRecommendation): void {
+    const textProfile = profile.query_info?.text_profile || '';
+    const lines = textProfile.split('\n');
+    
+    for (const line of lines) {
+      const skewMatch = line.match(/max:(\d+) at partition_(\d+), average: (\d+)/);
+      if (skewMatch) {
+        const max = parseInt(skewMatch[1], 10);
+        const partition = skewMatch[2];
+        const avg = parseInt(skewMatch[3], 10);
+        
+        if (max > avg * 3) {
+          result.suggestions.push({
+            issue: `Significant data skew detected in partition ${partition}`,
+            recommendation: 'Review your shard key choice and data distribution strategy to achieve more uniform load across partitions.',
+            impact: 'high'
+          });
+        }
+      }
+    }
+  }
+
+  private identifyBottlenecks(profile: any, result: OptimizationRecommendation): void {
+    const textProfile = profile.query_info?.text_profile || '';
+    const lines = textProfile.split('\n');
+    
+    const execTimes: Array<{operation: string, time: number}> = [];
+    
+    for (const line of lines) {
+      const execTimeMatch = line.match(/exec_time: (\d+)ms/);
+      if (execTimeMatch) {
+        const time = parseInt(execTimeMatch[1], 10);
+        const operationMatch = line.match(/^(\w+)/);
+        const operation = operationMatch ? operationMatch[1] : 'Unknown';
+        execTimes.push({ operation, time });
+      }
+    }
+    
+    execTimes.sort((a, b) => b.time - a.time);
+    
+    result.summary.bottlenecks = execTimes
+      .slice(0, 3)
+      .filter(item => item.time > 0)
+      .map(item => `${item.operation} (${item.time}ms)`);
+  }
+
   private server: Server;
   private connection: mysql.Connection | null = null;
   private caBundle: string | null = null;
@@ -378,6 +583,11 @@ class SingleStoreServer {
                 description: 'Number of rows to generate and insert',
                 default: 100
               },
+              batch_size: {
+                type: 'number',
+                description: 'Number of rows to insert in each batch',
+                default: 1000
+              },
               column_generators: {
                 type: 'object',
                 description: 'Custom generators for specific columns (optional)',
@@ -408,16 +618,25 @@ class SingleStoreServer {
                     }
                   }
                 }
-              },
-              batch_size: {
-                type: 'number',
-                description: 'Number of rows to insert in each batch',
-                default: 1000
               }
             },
             required: ['table']
           }
         },
+        {
+          name: 'optimize_sql',
+          description: 'Analyze a SQL query using PROFILE and provide optimization recommendations',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'SQL query to analyze and optimize'
+              }
+            },
+            required: ['query']
+          }
+        }
       ],
     }));
 
@@ -846,6 +1065,50 @@ class SingleStoreServer {
             throw new McpError(
               ErrorCode.InternalError,
               `Failed to generate synthetic data: ${err.message}`
+            );
+          }
+        }
+
+        case 'optimize_sql': {
+          if (!request.params.arguments || typeof request.params.arguments.query !== 'string') {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'Query parameter must be a string'
+            );
+          }
+
+          const query = request.params.arguments.query.trim();
+          
+          try {
+            // Step 1: Run PROFILE on the query
+            await conn.query('SET profile_for_debug = ON');
+            await conn.query(`PROFILE ${query}`);
+            
+            // Step 2: Get the profile data in JSON format
+            const [profileResult] = await conn.query('SHOW PROFILE JSON') as [mysql.RowDataPacket[], mysql.FieldPacket[]];
+            
+            // Step 3: Analyze the profile data and generate recommendations
+            const recommendations = await this.analyzeProfileData(profileResult[0], query);
+            
+            // Step 4: Return the analysis and recommendations
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    original_query: query,
+                    profile_summary: recommendations.summary,
+                    recommendations: recommendations.suggestions,
+                    optimized_query: recommendations.optimizedQuery || query
+                  }, null, 2)
+                }
+              ]
+            };
+          } catch (error: unknown) {
+            const err = error as Error;
+            throw new McpError(
+              ErrorCode.InternalError,
+              `Query optimization error: ${err.message}`
             );
           }
         }
