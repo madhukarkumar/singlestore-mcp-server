@@ -223,6 +223,27 @@ SINGLESTORE_DATABASE=your-database
      }
    })
    ```
+
+8. **optimize_sql**
+   - Analyze a SQL query using PROFILE and provide optimization recommendations
+   - Parameters:
+     - query: SQL query to analyze and optimize
+   ```typescript
+   use_mcp_tool({
+     server_name: "singlestore",
+     tool_name: "optimize_sql",
+     arguments: {
+       query: "SELECT * FROM customers JOIN orders ON customers.id = orders.customer_id WHERE region = 'west'"
+     }
+   })
+   ```
+   - The response includes:
+     - Original query
+     - Performance profile summary (total runtime, compile time, execution time)
+     - List of detected bottlenecks
+     - Optimization recommendations with impact levels (high/medium/low)
+     - Suggestions for indexes, joins, memory usage, and other optimizations
+
 ### Running Standalone
 
 1. Build the server:
