@@ -5,12 +5,34 @@ declare module '@modelcontextprotocol/sdk/server' {
     connect(transport: any): Promise<void>;
     close(): Promise<void>;
     onerror: (error: Error) => void;
+    handleMessage?(message: any): void;
   }
 }
 
 declare module '@modelcontextprotocol/sdk/server/stdio' {
   export class StdioServerTransport {
     constructor();
+  }
+}
+
+declare module '@modelcontextprotocol/sdk/server/sse' {
+  export interface SseClientConnection {
+    id: string;
+    res: any;
+    send: (data: any) => void;
+    close: () => void;
+    onclose?: () => void;
+    onerror?: (error: Error) => void;
+  }
+
+  export class SSEServerTransport {
+    constructor(endpoint: string, res: any);
+    clients: Map<string, SseClientConnection>;
+    broadcast(data: any): void;
+    close(): void;
+    onmessage?: (message: any) => void;
+    handlePostMessage?(req: any, res: any): void;
+    send(message: any): Promise<void>;
   }
 }
 

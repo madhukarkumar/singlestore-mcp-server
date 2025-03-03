@@ -12,6 +12,7 @@ A Model Context Protocol (MCP) server for interacting with SingleStore databases
 - Generate Mermaid ER diagrams of database schema
 - SSL support with automatic CA bundle fetching
 - Proper error handling and TypeScript type safety
+- Server-Sent Events (SSE) support for real-time streaming updates
 
 ## Prerequisites
 
@@ -56,6 +57,7 @@ SINGLESTORE_PORT=3306
 SINGLESTORE_USER=your-username
 SINGLESTORE_PASSWORD=your-password
 SINGLESTORE_DATABASE=your-database
+MCP_SSE_PORT=8080  # Optional: Port for the SSE server (default: 8080)
 ```
 
 ### Configuration Methods
@@ -68,6 +70,7 @@ SINGLESTORE_DATABASE=your-database
    export SINGLESTORE_USER=your-username
    export SINGLESTORE_PASSWORD=your-password
    export SINGLESTORE_DATABASE=your-database
+   export MCP_SSE_PORT=8080
    ```
 
 2. **MCP Settings Configuration**:
@@ -83,7 +86,8 @@ SINGLESTORE_DATABASE=your-database
            "SINGLESTORE_PORT": "3306",
            "SINGLESTORE_USER": "your-username",
            "SINGLESTORE_PASSWORD": "your-password",
-           "SINGLESTORE_DATABASE": "your-database"
+           "SINGLESTORE_DATABASE": "your-database",
+           "MCP_SSE_PORT": "8080"
          }
        }
      }
@@ -269,7 +273,8 @@ node build/index.js
         "SINGLESTORE_PORT": "your-port",
         "SINGLESTORE_USER": "your-username",
         "SINGLESTORE_PASSWORD": "your-password",
-        "SINGLESTORE_DATABASE": "your-database"
+        "SINGLESTORE_DATABASE": "your-database",
+        "MCP_SSE_PORT": "8080"
       }
     }
   }
@@ -311,6 +316,101 @@ npm run build
 
 ```bash
 npm test
+```
+
+## Server-Sent Events (SSE) Support
+
+The server includes support for Server-Sent Events (SSE), which enables real-time streaming of data from the server to clients.
+
+### SSE Endpoint
+
+The SSE endpoint is available at:
+
+```
+http://localhost:8080/sse
+```
+
+No authentication is required to connect to this endpoint.
+
+### Message Format
+
+The server sends events in the following JSON format:
+
+```json
+{
+  "type": "connection|progress|result|error|keep-alive",
+  "toolName": "tool_name",  // Only for progress, result, and error events
+  "data": {},               // For result events
+  "message": "Status message", // For progress events
+  "progress": 75,           // For progress events (0-100)
+  "error": "Error message", // For error events
+  "timestamp": "2025-03-02T16:51:16.123Z" // For keep-alive events
+}
+```
+
+### Connecting from a Client
+
+To connect to the SSE endpoint from a client:
+
+```javascript
+const eventSource = new EventSource('http://localhost:8080/sse');
+
+// Handle connection event
+eventSource.addEventListener('open', () => {
+  console.log('SSE connection established');
+});
+
+// Handle incoming messages
+eventSource.addEventListener('message', (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Received:', data);
+  
+  switch (data.type) {
+    case 'connection':
+      console.log('Connected to SSE server');
+      break;
+    case 'progress':
+      console.log(`${data.toolName} progress: ${data.progress}% - ${data.message}`);
+      break;
+    case 'result':
+      console.log(`${data.toolName} result:`, data.data);
+      break;
+    case 'error':
+      console.error(`${data.toolName} error:`, data.error);
+      break;
+    case 'keep-alive':
+      console.log('Keep-alive received at', data.timestamp);
+      break;
+  }
+});
+
+// Handle errors
+eventSource.addEventListener('error', (error) => {
+  console.error('SSE connection error:', error);
+  eventSource.close();
+});
+
+// Close connection when done
+function closeConnection() {
+  eventSource.close();
+}
+```
+
+### Using SSE with MCP Tools
+
+To use SSE with MCP tools, include the SSE client ID in the request metadata:
+
+```typescript
+use_mcp_tool({
+  server_name: "singlestore",
+  tool_name: "run_read_query",
+  arguments: {
+    query: "SELECT * FROM your_table LIMIT 5"
+  },
+  metadata: {
+    sseClientId: "client-id-received-on-connection"
+  }
+})
 ```
 
 ## Troubleshooting
