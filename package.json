@@ -3,10 +3,17 @@
   "version": "1.0.0",
   "description": "MCP server for interacting with SingleStore databases",
   "main": "build/index.js",
+  "type": "module",
   "scripts": {
     "build": "rm -rf build && tsc --build --force && chmod +x build/index.js",
     "start": "node build/index.js",
+    "start:sse": "SSE_ENABLED=true node build/index.js",
+    "start:inspector": "SSE_ENABLED=true MCP_SSE_PORT=8081 node build/index.js",
+    "inspector": "./run_with_inspector.sh",
+    "test:sse": "./test_sse_connection.sh",
+    "debug:headers": "./debug_headers.sh",
     "dev": "tsc -w",
+    "dev:sse": "tsc -w & SSE_ENABLED=true nodemon build/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -19,10 +26,15 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
     "mysql2": "^3.9.1"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/node": "^20.11.19",
+    "nodemon": "^3.0.3",
     "typescript": "^5.3.3"
   }
 }

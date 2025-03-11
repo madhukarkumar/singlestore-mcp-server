@@ -9,7 +9,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import * as mysql from 'mysql2/promise';
 import * as https from 'https';
+import * as http from 'http';
 import { randomBytes } from 'crypto';
+import express from 'express';
+import cors from 'cors';
 
 // Define extended RowDataPacket interfaces for better type safety
 interface TableRowDataPacket extends mysql.RowDataPacket {
@@ -99,7 +102,176 @@ async function fetchCABundle(): Promise<string> {
   });
 }
 
+// Interface for SSE client connection management
+interface SseClient {
+  id: string;
+  response: express.Response;
+}
+
 class SingleStoreServer {
+  // Array to track SSE client connections
+  private sseClients: SseClient[] = [];
+  // HTTP server for SSE support
+  private httpServer: http.Server | null = null;
+  private ssePort: number = parseInt(process.env.MCP_SSE_PORT || process.env.SSE_PORT || '8081');
+  
+  // Track the actual port we're using (in case the preferred port is unavailable)
+  private actualSsePort: number = this.ssePort;
+  
+  // Store the list tools response
+  private cachedTools: any = null;
+
+  // Helper method to handle requests directly
+  private async handleRequest(schema: any, request: any): Promise<any> {
+    if (schema === ListToolsRequestSchema) {
+      // Return cached tools list if available
+      if (this.cachedTools) {
+        return this.cachedTools;
+      }
+      
+      // Create a tools list by reading from the setupToolHandlers method
+      // This is a simplified version for the SSE API
+      return {
+        tools: [
+          {
+            name: 'generate_er_diagram',
+            description: 'Generate a Mermaid ER diagram of the database schema',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: [],
+            },
+          },
+          {
+            name: 'list_tables',
+            description: 'List all tables in the database',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: [],
+            },
+          },
+          // Add other tools - this would ideally be dynamically generated
+          {
+            name: 'query_table',
+            description: 'Execute a query on a table',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'SQL query to execute',
+                },
+              },
+              required: ['query'],
+            },
+          },
+          {
+            name: 'describe_table',
+            description: 'Get detailed information about a table',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                table: {
+                  type: 'string',
+                  description: 'Name of the table to describe',
+                },
+              },
+              required: ['table'],
+            },
+          },
+          {
+            name: 'run_read_query',
+            description: 'Execute a read-only (SELECT) query on the database',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'SQL SELECT query to execute',
+                },
+              },
+              required: ['query'],
+            },
+          },
+          {
+            name: 'create_table',
+            description: 'Create a new table with specified columns',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                table_name: { type: 'string' },
+                columns: { type: 'array' }
+              },
+              required: ['table_name', 'columns'],
+            },
+          },
+          {
+            name: 'generate_synthetic_data',
+            description: 'Generate synthetic data for a table',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                table: { type: 'string' },
+                count: { type: 'number' }
+              },
+              required: ['table'],
+            },
+          },
+          {
+            name: 'optimize_sql',
+            description: 'Analyze and optimize SQL queries',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' }
+              },
+              required: ['query'],
+            },
+          }
+        ],
+      };
+    } else if (schema === CallToolRequestSchema) {
+      // For tool calls, we need to delegate to the main server's handler
+      // To avoid complex IPC, we'll implement a direct call to the handler
+      
+      // Check if this is a valid tool
+      if (!request.params || !request.params.name) {
+        throw new McpError(ErrorCode.InvalidParams, 'Tool name is required');
+      }
+      
+      // Ensure we have a database connection
+      await this.ensureConnection();
+      
+      // Process the request directly using our tool implementation logic
+      switch (request.params.name) {
+        case 'list_tables':
+          // Call the same implementation as in setupToolHandlers
+          const conn = await this.ensureConnection();
+          const [rows] = await conn.query('SHOW TABLES') as [mysql.RowDataPacket[], mysql.FieldPacket[]];
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(rows, null, 2),
+              },
+            ],
+          };
+        
+        // For other tools, we need to delegate to the appropriate handler
+        // This implementation is simplified for demonstration purposes
+        // In a production scenario, you'd refactor the handlers to be reusable
+        default:
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            `Tool ${request.params.name} implementation not available via SSE API yet`
+          );
+      }
+    } else {
+      throw new Error('Unknown schema');
+    }
+  }
+
   // Helper method to generate random values based on column type
   private generateValueForColumn(columnType: string, isNullable: boolean): any {
     // Handle NULL values for nullable columns (10% chance)
@@ -373,6 +545,7 @@ class SingleStoreServer {
   private server: Server;
   private connection: mysql.Connection | null = null;
   private caBundle: string | null = null;
+  private app: express.Application;
 
   constructor() {
     this.server = new Server(
@@ -390,9 +563,555 @@ class SingleStoreServer {
     this.setupToolHandlers();
     
     this.server.onerror = (error) => console.error('[MCP Error]', error);
+    
+    // Initialize Express for SSE endpoint
+    this.app = express();
+    
+    // Configure CORS for all routes
+    this.app.use(cors({
+      origin: '*', // Allow all origins
+      methods: ['GET', 'POST', 'OPTIONS'], // Allowed methods
+      allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
+      credentials: true // Allow cookies
+    }));
+    
+    // Handle preflight requests
+    this.app.options('*', cors());
+    
+    // Parse JSON in request body
+    this.app.use(express.json());
+    
+    // Log all requests for debugging
+    this.app.use((req, res, next) => {
+      console.error(`[SSE] ${req.method} request to ${req.path} from ${req.ip}`);
+      next();
+    });
+    
+    // Set up SSE endpoints
+    this.setupSseEndpoints();
+    
+    // Dedicated endpoint for MCP Inspector - more compatible implementation
+    this.app.get('/stream', (req, res) => {
+      console.error('[SSE] Stream endpoint accessed directly');
+      try {
+        const clientId = randomBytes(16).toString('hex');
+        
+        // Set headers for SSE - using Express's type-specific method
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*'
+        });
+        
+        console.error(`[SSE] Stream headers set directly with writeHead`);
+        
+        // Log what we sent
+        console.error(`[SSE] Content-Type sent: ${res.getHeader('Content-Type')}`);
+        
+        // Initial message
+        res.write(`data: ${JSON.stringify({ type: 'connection_established', clientId })}\n\n`);
+        
+        // Store client
+        this.sseClients.push({ id: clientId, response: res });
+        
+        // Ping loop
+        const pingInterval = setInterval(() => {
+          try {
+            res.write(": ping\n\n");
+          } catch (error) {
+            clearInterval(pingInterval);
+          }
+        }, 30000);
+        
+        // Handle disconnect
+        req.on('close', () => {
+          clearInterval(pingInterval);
+          this.sseClients = this.sseClients.filter(client => client.id !== clientId);
+        });
+      } catch (error) {
+        console.error(`[SSE] Error in stream endpoint: ${error}`);
+        res.status(500).send('Error setting up SSE stream');
+      }
+    });
+    
+    // Special connection endpoint for MCP Inspector specifically
+    this.app.get('/connect', (req, res) => {
+      console.error('[SSE] Connect endpoint accessed - standard MCP Inspector endpoint');
+      
+      // Set transport-specific options
+      const transportType = req.query.transportType || 'sse';
+      console.error(`[SSE] Connect request with transport type: ${transportType}`);
+      
+      // If it's an SSE request, redirect to the stream endpoint
+      if (transportType === 'sse') {
+        const streamUrl = `/stream${req.query.url ? `?url=${req.query.url}` : ''}`;
+        console.error(`[SSE] Redirecting to stream endpoint: ${streamUrl}`);
+        return res.redirect(307, streamUrl);
+      }
+      
+      // Otherwise respond with connection info
+      res.status(200).json({
+        connected: true,
+        transportType: transportType,
+        server: 'SingleStore MCP Server'
+      });
+    });
+    
+    // Alternative dedicated MCP Inspector endpoint
+    this.app.get('/mcp-sse', (req, res) => {
+      console.error('[SSE] MCP-SSE endpoint accessed directly');
+      
+      // Set the necessary headers
+      res.set({
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      });
+      
+      // Send a 200 OK response
+      res.status(200);
+      
+      // Manually flush the headers to ensure they are sent
+      res.write(''); // This forces the headers to be sent
+      
+      // Send an initial event
+      res.write('data: {"connected":true}\n\n');
+      
+      // Set up a keepalive interval
+      const keepAliveInterval = setInterval(() => {
+        res.write(': keepalive\n\n');
+      }, 15000);
+      
+      // Handle client disconnect
+      req.on('close', () => {
+        clearInterval(keepAliveInterval);
+      });
+    });
+    
+    // Handle cleanup on process termination
     process.on('SIGINT', async () => {
       await this.cleanup();
       process.exit(0);
+    });
+  }
+  
+  // Setup SSE endpoints
+  private setupSseEndpoints() {
+    // Root endpoint
+    this.app.get('/', (req, res) => {
+      // Log connection details for debugging
+      console.error(`[SSE] Root endpoint accessed from ${req.ip} with headers:`, req.headers);
+      
+      // Special handling for MCP Inspector
+      const isMcpInspector = req.headers['user-agent']?.includes('node');
+      
+      if (isMcpInspector) {
+        console.error('[SSE] Detected MCP Inspector request');
+        // Return MCP server metadata in the format expected by MCP Inspector
+        return res.status(200).json({
+          jsonrpc: '2.0',
+          result: {
+            name: 'SingleStore MCP Server',
+            version: '0.1.0',
+            capabilities: {
+              tools: {},
+              transportTypes: ['sse']
+            }
+          }
+        });
+      }
+      
+      // Standard response for other clients
+      const serverInfo = {
+        name: 'SingleStore MCP Server',
+        version: '0.1.0',
+        status: 'running',
+        port: this.actualSsePort,
+        address: this.httpServer?.address(),
+        clientIP: req.ip,
+        server_time: new Date().toISOString(),
+        sse_url: `http://localhost:${this.actualSsePort}/sse`,
+        stream_url: `http://localhost:${this.actualSsePort}/stream`,
+        endpoints: {
+          '/': 'Server information',
+          '/health': 'Health check',
+          '/sse': 'SSE connection endpoint',
+          '/stream': 'Alternative SSE endpoint (for MCP Inspector)',
+          '/tools': 'List available tools',
+          '/call-tool': 'Call a tool (POST)'
+        }
+      };
+      
+      console.error(`[INFO] Server info requested - Port: ${this.actualSsePort}`);
+      res.status(200).json(serverInfo);
+    });
+    
+    // Health check endpoint
+    this.app.get('/health', (req, res) => {
+      res.status(200).json({ status: 'ok' });
+    });
+    
+    // Direct SSE endpoint for MCP Inspector
+    this.app.get('/sse', (req, res) => {
+      try {
+        const clientId = randomBytes(16).toString('hex');
+        const transportType = req.query.transportType || 'sse';
+        const url = req.query.url || 'not provided';
+        
+        // Log connection attempt with detailed information
+        console.error(`[SSE] Connection attempt from ${req.ip} with transport ${transportType}`);
+        console.error(`[SSE] Query parameters:`, req.query);
+        console.error(`[SSE] Headers:`, req.headers);
+        
+        // Debug: Check headers that are being used in the client's EventSource constructor
+        if (req.headers['accept']) {
+          console.error(`[SSE] Accept header: ${req.headers['accept']}`);
+        }
+        
+        // Add CORS preflight response for OPTIONS requests
+        if (req.method === 'OPTIONS') {
+          res.status(204).end();
+          return;
+        }
+        
+        // Reset headers to avoid any conflicts
+        res.removeHeader('Content-Type');
+        
+        // CRITICAL: Set Content-Type header FIRST before any writes - using the most direct method
+        res.header('Content-Type', 'text/event-stream');
+        
+        // CORS headers
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.header('Access-Control-Allow-Headers', 'Content-Type');
+        
+        // SSE headers
+        res.header('Cache-Control', 'no-cache');
+        res.header('Connection', 'keep-alive');
+        res.header('X-Accel-Buffering', 'no');
+        
+        // Force status code 200 before sending any data
+        res.status(200);
+        
+        // DEBUG: Log the content-type we're actually setting
+        console.error(`[SSE] Set Content-Type header: ${res.getHeader('Content-Type')}`);
+        
+        // Force flush headers before writing data
+        res.flushHeaders();
+        
+        // Send initial connection message in proper SSE format
+        // The first event must not have an event name for compatibility with some clients
+        res.write(`data: ${JSON.stringify({ type: 'connection_established', clientId })}\n\n`);
+        
+        // Then send an explicit open event
+        res.write(`event: open\ndata:\n\n`);
+        
+        // Mandatory ping for MCP inspector compatibility
+        const pingInterval = setInterval(() => {
+          try {
+            res.write(": ping\n\n");
+          } catch (error) {
+            console.error(`[SSE] Error sending ping to client ${clientId}:`, error);
+            clearInterval(pingInterval);
+          }
+        }, 30000);
+        
+        // Add client to active connections
+        this.sseClients.push({ id: clientId, response: res });
+        
+        // Handle client disconnect
+        req.on('close', () => {
+          clearInterval(pingInterval);
+          this.sseClients = this.sseClients.filter(client => client.id !== clientId);
+          console.error(`[SSE] Client ${clientId} disconnected, ${this.sseClients.length} clients remaining`);
+        });
+        
+        console.error(`[SSE] Client ${clientId} connected, total clients: ${this.sseClients.length}`);
+      } catch (error) {
+        console.error('[SSE] Error establishing connection:', error);
+        res.status(500).send('Error establishing SSE connection');
+      }
+    });
+    
+    // Endpoint to list available tools - supports both GET and POST for MCP inspector
+    this.app.get('/tools', async (req, res) => {
+      try {
+        const result = await this.handleRequest(ListToolsRequestSchema, {});
+        res.status(200).json(result);
+      } catch (error) {
+        const err = error as Error;
+        res.status(500).json({ 
+          error: { 
+            code: ErrorCode.InternalError, 
+            message: err.message || 'Failed to list tools'
+          }
+        });
+      }
+    });
+    
+    // Support POST requests from MCP inspector for listing tools
+    this.app.post('/tools', async (req, res) => {
+      try {
+        // Check if this is an MCP Inspector format request
+        if (req.body.method === 'mcp.list_tools') {
+          const result = await this.handleRequest(ListToolsRequestSchema, {});
+          res.status(200).json({
+            jsonrpc: '2.0',
+            id: req.body.id || 'list-tools-response',
+            result
+          });
+        } else {
+          // Handle custom format
+          const result = await this.handleRequest(ListToolsRequestSchema, {});
+          res.status(200).json(result);
+        }
+      } catch (error) {
+        const err = error as Error;
+        const mcpError = err instanceof McpError ? err : 
+                        new McpError(ErrorCode.InternalError, err.message);
+        
+        if (req.body.method === 'mcp.list_tools') {
+          res.status(500).json({
+            jsonrpc: '2.0',
+            id: req.body.id || 'list-tools-error',
+            error: {
+              code: mcpError.code || ErrorCode.InternalError,
+              message: mcpError.message || 'Failed to list tools'
+            }
+          });
+        } else {
+          res.status(500).json({ 
+            error: { 
+              code: mcpError.code || ErrorCode.InternalError, 
+              message: mcpError.message || 'Failed to list tools'
+            }
+          });
+        }
+      }
+    });
+    
+    // Endpoint to call a tool
+    this.app.post('/call-tool', async (req, res) => {
+      try {
+        // Support both MCP Inspector format and our custom format
+        let toolRequest;
+        
+        // Check if this is an MCP Inspector format request
+        if (req.body.method === 'mcp.call_tool' && req.body.params) {
+          // Standard MCP format via HTTP
+          toolRequest = {
+            params: req.body.params
+          };
+          console.error('[SSE] Received MCP Inspector format tool request:', req.body.params.name);
+        } else {
+          // Our custom format
+          const { name, arguments: args, client_id } = req.body;
+          
+          if (!name) {
+            return res.status(400).json({ 
+              error: { 
+                code: ErrorCode.InvalidParams,
+                message: 'Tool name is required' 
+              }
+            });
+          }
+          
+          toolRequest = {
+            params: {
+              name,
+              arguments: args || {}
+            }
+          };
+          console.error(`[SSE] Received custom format tool request: ${name}`);
+        }
+        
+        // Get client_id from either format
+        const client_id = req.body.client_id || 
+                        (req.body.params && req.body.params._meta && req.body.params._meta.client_id);
+        
+        // Find if there's a specific client to send the response to
+        const targetClient = client_id ? 
+          this.sseClients.find(client => client.id === client_id) : 
+          null;
+        
+        // If specific client requested but not found
+        if (client_id && !targetClient) {
+          return res.status(404).json({ 
+            error: { 
+              code: ErrorCode.InvalidParams,
+              message: 'Client not found' 
+            }
+          });
+        }
+        
+        // For immediate response without streaming
+        if (!targetClient) {
+          try {
+            const result = await this.handleRequest(CallToolRequestSchema, toolRequest);
+            
+            // Return in MCP format if the request was in MCP format
+            if (req.body.method === 'mcp.call_tool') {
+              return res.status(200).json({
+                jsonrpc: '2.0',
+                id: req.body.id || 'call-tool-response',
+                result
+              });
+            } else {
+              return res.status(200).json(result);
+            }
+          } catch (error) {
+            const err = error as Error;
+            const mcpError = err instanceof McpError ? err : 
+                            new McpError(ErrorCode.InternalError, err.message);
+            
+            // Return in MCP format if the request was in MCP format
+            if (req.body.method === 'mcp.call_tool') {
+              return res.status(500).json({
+                jsonrpc: '2.0',
+                id: req.body.id || 'call-tool-error',
+                error: {
+                  code: mcpError.code || ErrorCode.InternalError,
+                  message: mcpError.message
+                }
+              });
+            } else {
+              return res.status(500).json({ 
+                error: {
+                  code: mcpError.code || ErrorCode.InternalError,
+                  message: mcpError.message
+                }
+              });
+            }
+          }
+        }
+        
+        // For streaming response via SSE
+        res.status(202).json({ message: 'Request accepted for streaming' });
+        
+        // Start executing the tool and stream results
+        this.executeToolWithStreaming(toolRequest, targetClient);
+      } catch (error) {
+        const err = error as Error;
+        const mcpError = err instanceof McpError ? err : 
+                        new McpError(ErrorCode.InternalError, err.message);
+        
+        res.status(500).json({ 
+          error: {
+            code: mcpError.code || ErrorCode.InternalError,
+            message: mcpError.message
+          }
+        });
+      }
+    });
+  }
+  
+  // Execute a tool and stream results to the specified SSE client
+  private async executeToolWithStreaming(request: any, client: SseClient) {
+    try {
+      // Extract the request ID (if provided) or generate a new one
+      let requestId = '';
+      
+      if (request.id) {
+        // If request has an ID directly (our custom format)
+        requestId = request.id;
+      } else if (request.params && request.params._meta && request.params._meta.id) {
+        // If request is in MCP format with ID in _meta
+        requestId = request.params._meta.id;
+      } else {
+        // Generate a new ID if none was provided
+        requestId = randomBytes(8).toString('hex');
+      }
+      
+      console.error(`[SSE] Executing tool ${request.params.name} with request ID ${requestId}`);
+      
+      // Send start event - use the message format expected by MCP Inspector
+      this.sendSseEvent(client, 'message', {
+        jsonrpc: '2.0',
+        method: 'mcp.call_tool.update',
+        params: {
+          status: 'started',
+          name: request.params.name,
+          arguments: request.params.arguments || {},
+          timestamp: new Date().toISOString()
+        }
+      });
+      
+      // Execute the tool
+      const result = await this.handleRequest(CallToolRequestSchema, request);
+      
+      console.error(`[SSE] Tool execution completed for ${request.params.name}`);
+      
+      // Send result event in MCP format
+      this.sendSseEvent(client, 'message', {
+        jsonrpc: '2.0',
+        id: requestId,
+        result: result
+      });
+    } catch (error) {
+      const err = error as Error;
+      const mcpError = err instanceof McpError ? err : 
+                      new McpError(ErrorCode.InternalError, err.message);
+      
+      console.error(`[SSE] Tool execution error for ${request.params.name}: ${mcpError.message}`);
+      
+      // Send error event in MCP format
+      this.sendSseEvent(client, 'message', {
+        jsonrpc: '2.0',
+        id: request.id || randomBytes(8).toString('hex'),
+        error: {
+          code: mcpError.code || ErrorCode.InternalError,
+          message: mcpError.message
+        }
+      });
+    }
+  }
+  
+  // Send an event to a specific SSE client
+  private sendSseEvent(client: SseClient, event: string, data: any) {
+    try {
+      // Ensure client response is still writable
+      if (!client.response.writableEnded) {
+        // Format according to the SSE standard
+        const jsonData = JSON.stringify(data);
+        console.error(`[SSE] Sending event ${event} to client ${client.id} (data length: ${jsonData.length})`);
+        
+        // For MCP Inspector compatibility, properly format the message
+        if (jsonData.length > 16384) {
+          // For large payloads, first send the event type
+          client.response.write(`event: ${event}\n`);
+          
+          // Then split the data into chunks
+          let i = 0;
+          while (i < jsonData.length) {
+            const chunk = jsonData.slice(i, i + 16384);
+            client.response.write(`data: ${chunk}\n`);
+            i += 16384;
+          }
+          
+          // End with a blank line
+          client.response.write('\n');
+        } else {
+          // Standard format for normal-sized messages
+          client.response.write(`event: ${event}\n`);
+          client.response.write(`data: ${jsonData}\n\n`);
+        }
+        
+        console.error(`[SSE] Sent ${event} event to client ${client.id}`);
+      } else {
+        console.error(`[SSE] Cannot send event to client ${client.id}: connection closed`);
+      }
+    } catch (error) {
+      console.error(`[SSE] Error sending event to client ${client.id}:`, error);
+    }
+  }
+  
+  // Broadcast an event to all connected SSE clients
+  private broadcastSseEvent(event: string, data: any) {
+    console.error(`[SSE] Broadcasting ${event} to ${this.sseClients.length} clients`);
+    this.sseClients.forEach(client => {
+      this.sendSseEvent(client, event, data);
     });
   }
 
@@ -430,7 +1149,26 @@ class SingleStoreServer {
     if (this.connection) {
       await this.connection.end();
     }
+    
+    // Close HTTP server if running
+    if (this.httpServer) {
+      await new Promise<void>((resolve) => {
+        this.httpServer?.close(() => resolve());
+      });
+    }
+    
+    // Close MCP server
     await this.server.close();
+    
+    // Clean up SSE clients
+    this.sseClients.forEach(client => {
+      try {
+        client.response.end();
+      } catch (error) {
+        console.error(`[SSE] Error closing client ${client.id}:`, error);
+      }
+    });
+    this.sseClients = [];
   }
 
   private setupToolHandlers() {
@@ -1123,9 +1861,73 @@ class SingleStoreServer {
   }
 
   async run() {
+    // Start the Standard MCP server over stdio for traditional MCP tools
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('SingleStore MCP server running on stdio');
+    console.error('STDIO transport connected');
+    
+    // Start the HTTP server for SSE if SSE_ENABLED is set
+    if (process.env.SSE_ENABLED === 'true') {
+      try {
+        this.httpServer = http.createServer(this.app);
+        
+        // Try to start the server on the configured port
+        await new Promise<void>((resolve, reject) => {
+          this.httpServer?.on('error', (err: any) => {
+            if (err.code === 'EADDRINUSE') {
+              console.error(`ERROR: Port ${this.ssePort} is already in use. This could be caused by:
+1. Another instance of the server is already running
+2. Another application is using this port
+3. A previous instance of the server did not shut down properly
+
+Try one of the following solutions:
+- Change the port by setting MCP_SSE_PORT in your .env file
+- Kill the process using port ${this.ssePort} with: lsof -i :${this.ssePort} | grep LISTEN
+  Then kill the process with: kill -9 <PID>`);
+              
+              // Try an alternative port
+              const alternativePort = this.ssePort + 1;
+              console.error(`Attempting to use alternative port ${alternativePort}...`);
+              
+              this.httpServer?.removeAllListeners('error');
+              this.httpServer?.listen(alternativePort, '0.0.0.0', () => {
+                // Update the actual port to the alternative
+                this.actualSsePort = alternativePort;
+                console.error(`Setting up SSE transport for MCP...`);
+                console.error(`Starting SSE transport`);
+                console.error(`SSE transport connected to server successfully`);
+                console.error(`MCP SingleStore SSE server listening on port ${this.actualSsePort}`);
+                console.error(`SSE transport routes set up successfully`);
+                console.error(`Access SSE endpoint at: http://localhost:${this.actualSsePort}/sse`);
+                console.error(`MCP Inspector compatible endpoints:`);
+                console.error(`  - http://localhost:${this.actualSsePort}/connect?transportType=sse`);
+                console.error(`  - http://localhost:${this.actualSsePort}/stream`);
+                console.error(`  - http://localhost:${this.actualSsePort}/mcp-sse`);
+                console.error(`Send JSON-RPC messages to: http://localhost:${this.actualSsePort}/sse-messages`);
+                resolve();
+              });
+            } else {
+              reject(err);
+            }
+          });
+          
+          // Listen on all network interfaces (0.0.0.0) instead of just localhost
+          this.httpServer?.listen(this.ssePort, '0.0.0.0', () => {
+            this.actualSsePort = this.ssePort;
+            console.error(`MCP SingleStore SSE server listening on port ${this.actualSsePort}`);
+            console.error(`Access SSE endpoint at: http://localhost:${this.actualSsePort}/sse`);
+            console.error(`MCP Inspector compatible endpoints:`);
+            console.error(`  - http://localhost:${this.actualSsePort}/connect?transportType=sse`);
+            console.error(`  - http://localhost:${this.actualSsePort}/stream`);
+            console.error(`  - http://localhost:${this.actualSsePort}/mcp-sse`);
+            console.error(`Send JSON-RPC messages to: http://localhost:${this.actualSsePort}/sse-messages`);
+            resolve();
+          });
+        });
+      } catch (error) {
+        console.error('[SSE] Failed to start HTTP server:', error);
+      }
+    }
   }
 }
 

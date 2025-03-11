@@ -5,6 +5,7 @@ declare module '@modelcontextprotocol/sdk/server' {
     connect(transport: any): Promise<void>;
     close(): Promise<void>;
     onerror: (error: Error) => void;
+    handleJsonRpcRequest(request: any): Promise<any>;
   }
 }
 
