@@ -46,7 +46,7 @@ npm install
 npm run build
 ```
 
-## Configuration
+## Environment Variables
 
 The server requires the following environment variables:
 
@@ -58,10 +58,12 @@ SINGLESTORE_PASSWORD=your-password
 SINGLESTORE_DATABASE=your-database
 ```
 
-### Configuration Methods
+All environment variables are required for the server to establish a connection to your SingleStore database. The connection uses SSL with the SingleStore CA bundle, which is automatically fetched from the SingleStore portal.
 
-1. **Environment Variables**:
-   Set the variables in your shell:
+### Setting Environment Variables
+
+1. **In Your Shell**:
+   Set the variables in your terminal before running the server:
    ```bash
    export SINGLESTORE_HOST=your-host.singlestore.com
    export SINGLESTORE_PORT=3306
@@ -70,25 +72,8 @@ SINGLESTORE_DATABASE=your-database
    export SINGLESTORE_DATABASE=your-database
    ```
 
-2. **MCP Settings Configuration**:
-   Add to your MCP settings file (e.g., `cline_mcp_settings.json` or `claude_desktop_config.json`):
-   ```json
-   {
-     "mcpServers": {
-       "singlestore": {
-         "command": "node",
-         "args": ["path/to/mcp-server-singlestore/build/index.js"],
-         "env": {
-           "SINGLESTORE_HOST": "your-host.singlestore.com",
-           "SINGLESTORE_PORT": "3306",
-           "SINGLESTORE_USER": "your-username",
-           "SINGLESTORE_PASSWORD": "your-password",
-           "SINGLESTORE_DATABASE": "your-database"
-         }
-       }
-     }
-   }
-   ```
+2. **In Client Configuration Files**:
+   Add the variables to your MCP client configuration file as shown in the integration sections below.
 
 ## Usage
 
@@ -255,9 +240,14 @@ npm run build
 node build/index.js
 ```
 
-### Installing in Claude Desktop App
+## MCP Client Integration
 
-1. Add the server configuration to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### Installing in Claude Desktop
+
+1. Add the server configuration to your Claude Desktop config file located at:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
 ```json
 {
   "mcpServers": {
@@ -266,7 +256,7 @@ node build/index.js
       "args": ["path/to/mcp-server-singlestore/build/index.js"],
       "env": {
         "SINGLESTORE_HOST": "your-host.singlestore.com",
-        "SINGLESTORE_PORT": "your-port",
+        "SINGLESTORE_PORT": "3306",
         "SINGLESTORE_USER": "your-username",
         "SINGLESTORE_PASSWORD": "your-password",
         "SINGLESTORE_DATABASE": "your-database"
@@ -277,6 +267,70 @@ node build/index.js
 ```
 
 2. Restart the Claude Desktop App
+
+3. In your conversation with Claude, you can now use the SingleStore MCP server with:
+```
+use_mcp_tool({
+  server_name: "singlestore",
+  tool_name: "list_tables",
+  arguments: {}
+})
+```
+
+### Installing in Windsurf 
+
+1. Add the server configuration to your Windsurf config file located at:
+   - macOS: `~/Library/Application Support/Windsurf/config.json`
+   - Windows: `%APPDATA%\Windsurf\config.json`
+
+```json
+{
+  "mcpServers": {
+    "singlestore": {
+      "command": "node",
+      "args": ["path/to/mcp-server-singlestore/build/index.js"],
+      "env": {
+        "SINGLESTORE_HOST": "your-host.singlestore.com",
+        "SINGLESTORE_PORT": "3306",
+        "SINGLESTORE_USER": "your-username",
+        "SINGLESTORE_PASSWORD": "your-password",
+        "SINGLESTORE_DATABASE": "your-database"
+      }
+    }
+  }
+}
+```
+
+2. Restart Windsurf
+
+3. In your conversation with Claude in Windsurf, the SingleStore MCP tools will be available automatically when Claude needs to access database information.
+
+### Installing in Cursor
+
+1. Add the server configuration to your Cursor settings:
+   - Open Cursor
+   - Go to Settings (gear icon) > Extensions > Claude AI > MCP Servers
+   - Add a new MCP server with the following configuration:
+
+```json
+{
+  "singlestore": {
+    "command": "node",
+    "args": ["path/to/mcp-server-singlestore/build/index.js"],
+    "env": {
+      "SINGLESTORE_HOST": "your-host.singlestore.com",
+      "SINGLESTORE_PORT": "3306",
+      "SINGLESTORE_USER": "your-username",
+      "SINGLESTORE_PASSWORD": "your-password",
+      "SINGLESTORE_DATABASE": "your-database"
+    }
+  }
+}
+```
+
+2. Restart Cursor
+
+3. When using Claude AI within Cursor, the SingleStore MCP tools will be available for database operations.
 
 
 ## Security Considerations
@@ -316,14 +370,22 @@ npm test
 ## Troubleshooting
 
 1. **Connection Issues**
-   - Verify credentials and host information
+   - Verify credentials and host information in your environment variables
    - Check SSL configuration
    - Ensure database is accessible from your network
+   - Check your firewall settings to allow outbound connections to your SingleStore database
 
 2. **Build Issues**
    - Clear node_modules and reinstall dependencies
    - Verify TypeScript configuration
-   - Check Node.js version compatibility
+   - Check Node.js version compatibility (should be 16+)
+
+3. **MCP Integration Issues**
+   - Verify the path to the server's build/index.js file is correct in your client configuration
+   - Check that all environment variables are properly set in your client configuration
+   - Restart your client application after making configuration changes
+   - Check client logs for any error messages related to the MCP server
+   - Try running the server standalone first to validate it works outside the client
 
 ## Contributing
 
